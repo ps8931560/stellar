@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // with stale fixed-position measurements after a refresh.
 function resetCinematicHomepageScroll() {
     if (!document.getElementById('forge-stage-experience')) return;
+    if (window.location.hash || window.location.search.includes('country=')) return;
 
     if ('scrollRestoration' in window.history) {
         window.history.scrollRestoration = 'manual';
@@ -62,8 +63,10 @@ function initHomepagePinnedStories() {
     const initialize = () => {
         const root = document.documentElement;
         const previousBehavior = root.style.scrollBehavior;
-        root.style.scrollBehavior = 'auto';
-        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        if (!window.location.hash && !window.location.search.includes('country=')) {
+            root.style.scrollBehavior = 'auto';
+            window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        }
 
         initBookExperience();
         initForgeCountries();
@@ -72,6 +75,26 @@ function initHomepagePinnedStories() {
         if (typeof ScrollTrigger !== 'undefined') {
             ScrollTrigger.sort();
             ScrollTrigger.refresh();
+        }
+
+        // Check if user requested a specific hash target or country slide
+        if (window.location.hash) {
+            const targetEl = document.querySelector(window.location.hash);
+            if (targetEl && typeof ScrollTrigger !== 'undefined') {
+                const trigger = ScrollTrigger.getAll().find(t => t.trigger === targetEl);
+                if (trigger) {
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const countryParam = urlParams.get('country');
+                    if (countryParam !== null) {
+                        const slide = Math.max(0, Math.min(6, parseInt(countryParam, 10) || 0));
+                        const step = (trigger.end - trigger.start) / 6;
+                        window.scrollTo({ top: trigger.start + slide * step + (step * 0.08), left: 0, behavior: 'auto' });
+                    } else {
+                        window.scrollTo({ top: trigger.start, left: 0, behavior: 'auto' });
+                    }
+                    return;
+                }
+            }
         }
 
         // A refresh may preserve the browser's former coordinate; keep the
@@ -648,48 +671,334 @@ function initMagneticButtons() {
     });
 }
 
-// 10. Lightbox Modal for Real Student & Campus Photos
+// 10. Lightbox Modal & Zoom Viewer for Real Student & Campus Photos
 function initGalleryLightbox() {
     let lightbox = document.getElementById('stellar-lightbox');
     if (!lightbox) {
         lightbox = document.createElement('div');
         lightbox.id = 'stellar-lightbox';
         lightbox.className = 'modal-lightbox-backdrop';
+        lightbox.setAttribute('role', 'dialog');
+        lightbox.setAttribute('aria-modal', 'true');
+        lightbox.setAttribute('aria-label', 'Image preview viewer');
         lightbox.innerHTML = `
-            <div class="modal-lightbox-content" style="position:relative;background:#000;">
-                <button id="lightbox-close" style="position:absolute;top:12px;right:12px;background:rgba(0,0,0,0.75);border:1px solid rgba(255,255,255,0.3);color:white;width:36px;height:36px;border-radius:50%;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:20">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                </button>
-                <img id="lightbox-img" src="" alt="Stellar Experience" style="max-height:80vh;max-width:90vw;display:block;object-fit:contain;border-radius:6px"/>
-                <div id="lightbox-caption" style="padding:12px 16px;background:rgba(0,10,25,0.95);color:white;font-family:var(--font-inter);font-size:0.85rem;border-top:1px solid rgba(255,255,255,0.1)"></div>
+            <div class="modal-lightbox-content">
+                <header class="modal-lightbox-header">
+                    <div class="modal-lightbox-controls">
+                        <button type="button" class="lightbox-btn" id="lightbox-zoom-out" aria-label="Zoom out" title="Zoom out">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        </button>
+                        <span class="lightbox-zoom-val" id="lightbox-zoom-level" title="Click to reset zoom" role="button" tabindex="0" aria-label="Reset zoom">100%</span>
+                        <button type="button" class="lightbox-btn" id="lightbox-zoom-in" aria-label="Zoom in" title="Zoom in">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        </button>
+                    </div>
+                    <button type="button" class="lightbox-close-btn" id="lightbox-close" aria-label="Close enlarged viewer (Escape)" title="Close viewer (Esc)">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                </header>
+                <div class="modal-lightbox-viewport" id="lightbox-viewport">
+                    <img id="lightbox-img" src="" alt="Enlarged photo" draggable="false" />
+                </div>
+                <footer class="modal-lightbox-footer">
+                    <div id="lightbox-caption"></div>
+                    <span class="lightbox-hint">Scroll / Pinch to zoom • Drag to pan</span>
+                </footer>
             </div>
         `;
         document.body.appendChild(lightbox);
+    }
 
-        lightbox.addEventListener('click', (e) => {
-            if (e.target === lightbox || e.target.closest('#lightbox-close')) {
-                lightbox.classList.remove('active');
+    const viewport = document.getElementById('lightbox-viewport');
+    const lightboxImg = document.getElementById('lightbox-img');
+    const zoomLevelEl = document.getElementById('lightbox-zoom-level');
+    const zoomInBtn = document.getElementById('lightbox-zoom-in');
+    const zoomOutBtn = document.getElementById('lightbox-zoom-out');
+    const closeBtn = document.getElementById('lightbox-close');
+    const captionEl = document.getElementById('lightbox-caption');
+
+    let currentScale = 1.0;
+    let translateX = 0;
+    let translateY = 0;
+    let isPanning = false;
+    let startX = 0;
+    let startY = 0;
+    let lastActiveTrigger = null;
+
+    function updateTransform(withTransition = true) {
+        if (!lightboxImg) return;
+        if (withTransition) {
+            lightboxImg.classList.remove('no-transition');
+        } else {
+            lightboxImg.classList.add('no-transition');
+        }
+        lightboxImg.style.transform = `translate(${translateX}px, ${translateY}px) scale(${currentScale})`;
+        if (zoomLevelEl) {
+            zoomLevelEl.textContent = `${Math.round(currentScale * 100)}%`;
+        }
+        if (viewport) {
+            if (currentScale > 1.05) {
+                viewport.classList.add('is-zoomed');
+            } else {
+                viewport.classList.remove('is-zoomed');
             }
-        });
+        }
+    }
 
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && lightbox.classList.contains('active')) {
-                lightbox.classList.remove('active');
+    function clampOffsets() {
+        if (!lightboxImg || !viewport) return;
+        if (currentScale <= 1.0) {
+            translateX = 0;
+            translateY = 0;
+            return;
+        }
+        const naturalW = lightboxImg.offsetWidth * currentScale;
+        const naturalH = lightboxImg.offsetHeight * currentScale;
+        const viewW = viewport.clientWidth;
+        const viewH = viewport.clientHeight;
+
+        const maxOffsetX = Math.max(0, (naturalW - viewW) / 2) + 60;
+        const maxOffsetY = Math.max(0, (naturalH - viewH) / 2) + 60;
+
+        translateX = Math.max(-maxOffsetX, Math.min(maxOffsetX, translateX));
+        translateY = Math.max(-maxOffsetY, Math.min(maxOffsetY, translateY));
+    }
+
+    function setZoom(newScale, withTransition = true) {
+        const clamped = Math.min(4.5, Math.max(1.0, newScale));
+        currentScale = clamped;
+        if (currentScale <= 1.0) {
+            translateX = 0;
+            translateY = 0;
+        } else {
+            clampOffsets();
+        }
+        updateTransform(withTransition);
+    }
+
+    function resetZoom() {
+        setZoom(1.0, true);
+    }
+
+    function openLightbox(imgElement) {
+        lastActiveTrigger = imgElement;
+        resetZoom();
+        if (lightboxImg) {
+            lightboxImg.src = imgElement.src;
+            lightboxImg.alt = imgElement.alt || 'Enlarged photo';
+        }
+        if (captionEl) {
+            captionEl.textContent = imgElement.alt || 'Stellar Edu Consultancy Medical Community';
+        }
+        lightbox.classList.add('active');
+        document.body.style.overflow = 'hidden';
+        document.body.style.touchAction = 'none';
+        if (closeBtn) {
+            setTimeout(() => closeBtn.focus(), 50);
+        }
+    }
+
+    function closeLightbox() {
+        lightbox.classList.remove('active');
+        document.body.style.overflow = '';
+        document.body.style.touchAction = '';
+        resetZoom();
+        if (lastActiveTrigger && typeof lastActiveTrigger.focus === 'function') {
+            lastActiveTrigger.focus();
+        }
+    }
+
+    // Zoom Buttons
+    if (zoomInBtn) {
+        zoomInBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setZoom(currentScale + 0.4);
+        });
+    }
+    if (zoomOutBtn) {
+        zoomOutBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setZoom(currentScale - 0.4);
+        });
+    }
+    if (zoomLevelEl) {
+        zoomLevelEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            resetZoom();
+        });
+        zoomLevelEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                resetZoom();
             }
         });
     }
 
-    const galleryImages = document.querySelectorAll('section img[src*="stellar_"], section img[src*="alfa_"], section img[src*="/gallery/gallery-"]');
-    galleryImages.forEach(img => {
+    // Close Button & Backdrop
+    if (closeBtn) {
+        closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeLightbox();
+        });
+    }
+
+    lightbox.addEventListener('click', (e) => {
+        // Close if clicking outside the image or when clicking backdrop at 1.0x scale
+        if (e.target === viewport || e.target === lightbox) {
+            closeLightbox();
+        }
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (!lightbox.classList.contains('active')) return;
+        if (e.key === 'Escape') {
+            closeLightbox();
+        } else if (e.key === '+' || e.key === '=') {
+            setZoom(currentScale + 0.3);
+        } else if (e.key === '-' || e.key === '_') {
+            setZoom(currentScale - 0.3);
+        } else if (e.key === '0') {
+            resetZoom();
+        }
+    });
+
+    // Mouse Wheel Zoom
+    if (viewport) {
+        viewport.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 0.25 : -0.25;
+            setZoom(currentScale + delta, false);
+        }, { passive: false });
+
+        // Click / Double-click on Image
+        let lastClickTime = 0;
+        lightboxImg.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const now = Date.now();
+            if (now - lastClickTime < 300) {
+                // Double click toggle
+                if (currentScale > 1.1) {
+                    resetZoom();
+                } else {
+                    setZoom(2.2, true);
+                }
+            } else if (currentScale === 1.0) {
+                // Single click at 1.0 zooms in
+                setZoom(2.0, true);
+            }
+            lastClickTime = now;
+        });
+
+        // Mouse Drag to Pan
+        viewport.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            if (currentScale > 1.0) {
+                isPanning = true;
+                startX = e.clientX - translateX;
+                startY = e.clientY - translateY;
+                viewport.classList.add('is-panning');
+                e.preventDefault();
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!isPanning) return;
+            translateX = e.clientX - startX;
+            translateY = e.clientY - startY;
+            clampOffsets();
+            updateTransform(false);
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isPanning) {
+                isPanning = false;
+                viewport.classList.remove('is-panning');
+            }
+        });
+
+        // Touch Pinch & Pan on Mobile
+        let initialPinchDist = null;
+        let initialPinchScale = 1.0;
+        let lastTouchEnd = 0;
+
+        viewport.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                initialPinchDist = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+                initialPinchScale = currentScale;
+            } else if (e.touches.length === 1 && currentScale > 1.0) {
+                isPanning = true;
+                startX = e.touches[0].clientX - translateX;
+                startY = e.touches[0].clientY - translateY;
+            }
+        }, { passive: false });
+
+        viewport.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 2 && initialPinchDist) {
+                e.preventDefault();
+                const dist = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+                const ratio = dist / initialPinchDist;
+                setZoom(initialPinchScale * ratio, false);
+            } else if (e.touches.length === 1 && isPanning) {
+                e.preventDefault();
+                translateX = e.touches[0].clientX - startX;
+                translateY = e.touches[0].clientY - startY;
+                clampOffsets();
+                updateTransform(false);
+            }
+        }, { passive: false });
+
+        viewport.addEventListener('touchend', (e) => {
+            if (e.touches.length < 2) {
+                initialPinchDist = null;
+            }
+            if (e.touches.length === 0) {
+                isPanning = false;
+                if (currentScale < 1.0) {
+                    resetZoom();
+                }
+                const now = Date.now();
+                if (now - lastTouchEnd < 300) {
+                    // Double-tap
+                    if (currentScale > 1.1) {
+                        resetZoom();
+                    } else {
+                        setZoom(2.2, true);
+                    }
+                }
+                lastTouchEnd = now;
+            }
+        });
+    }
+
+    // Attach to all relevant images including new IMG20250902170755
+    const targetImages = document.querySelectorAll(
+        'img[src*="IMG20250902170755"], section img[src*="stellar_"], section img[src*="alfa_"], section img[src*="/gallery/gallery-"]'
+    );
+    targetImages.forEach(img => {
         img.style.cursor = 'zoom-in';
+        if (!img.hasAttribute('tabindex')) img.setAttribute('tabindex', '0');
+        if (!img.hasAttribute('role')) img.setAttribute('role', 'button');
+        if (!img.hasAttribute('aria-label')) {
+            img.setAttribute('aria-label', `View image in fullscreen: ${img.alt || 'Stellar Photo'}`);
+        }
         img.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const lightboxImg = document.getElementById('lightbox-img');
-            const lightboxCaption = document.getElementById('lightbox-caption');
-            if (lightboxImg) lightboxImg.src = img.src;
-            if (lightboxCaption) lightboxCaption.textContent = img.alt || 'Stellar Edu Consultancy Medical Community';
-            lightbox.classList.add('active');
+            openLightbox(img);
+        });
+        img.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                openLightbox(img);
+            }
         });
     });
 }
@@ -699,6 +1008,10 @@ function initScrollReveals() {
     const revealTargets = document.querySelectorAll('main section > div.container-custom');
     if (!revealTargets.length) return;
 
+    // Use a generous bottom root margin so content triggers well before the
+    // user has to scroll to the very edge of each container. This also ensures
+    // that on gallery / inner pages where most content is in the initial
+    // viewport, everything is revealed immediately without requiring a scroll.
     const observer = new IntersectionObserver((entries, obs) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
@@ -706,13 +1019,22 @@ function initScrollReveals() {
                 obs.unobserve(entry.target);
             }
         });
-    }, { threshold: 0.08 });
+    }, { threshold: 0.01, rootMargin: '0px 0px 200px 0px' });
 
     revealTargets.forEach(el => {
         if (!el.classList.contains('motion-fade-up')) {
             el.classList.add('motion-fade-up');
         }
-        observer.observe(el);
+
+        // Immediately reveal elements that are already inside the viewport at
+        // page-load time (e.g. the hero section and first content block on
+        // every inner page, including the gallery photo grid).
+        const rect = el.getBoundingClientRect();
+        if (rect.top < window.innerHeight && rect.bottom > 0) {
+            el.classList.add('is-visible');
+        } else {
+            observer.observe(el);
+        }
     });
 }
 
@@ -1009,34 +1331,16 @@ function initBookExperience() {
     });
 
     mm.add('(max-width: 767px)', () => {
-        // Mobile uses a wider closed silhouette because the two paper faces stack.
-        gsap.set(book, { scale: 0.92, y: 38, opacity: 1, clipPath: 'inset(0% 32% 0% 32% round 8px)' });
+        // Mobile presents the two book pages as natural sequential folio cards without clipping or overflow
+        gsap.set(book, { scale: 1, y: 0, opacity: 1, clipPath: 'none', transform: 'none' });
+        gsap.set(leftPage, { rotationY: 0, filter: 'none', transform: 'none', opacity: 1 });
+        gsap.set(rightPage, { rotationY: 0, filter: 'none', transform: 'none', opacity: 1 });
         gsap.set(header, { opacity: 1, y: 0 });
-        gsap.set(pageContent, { opacity: 0, y: 14 });
-
-        const tl = gsap.timeline({
-            scrollTrigger: {
-                trigger: section,
-                start: () => section.offsetTop,
-                end: () => section.offsetTop + 1800,
-                pin: sticky,
-                scrub: true,
-                anticipatePin: 1,
-                invalidateOnRefresh: true,
-                refreshPriority: 2
-            },
-            onUpdate: () => {
-                section.style.setProperty('--book-progress', `${(tl.progress() * 100).toFixed(2)}%`);
-                progress.querySelector('small').textContent = tl.progress() > 0.82 ? 'Chapter open' : 'Scroll to open';
-            }
-        });
-
-        tl.to(book, { clipPath: 'inset(0% 0% 0% 0% round 8px)', scale: 1, y: 0, duration: 1.8, ease: 'none' })
-          .to(pageContent, { opacity: 1, y: 0, duration: 0.72, stagger: 0.04, ease: 'none' }, 0.9)
-          .to({}, { duration: 0.2 });
+        gsap.set(pageContent, { opacity: 1, y: 0 });
+        section.classList.add('book-story--open');
+        if (progress) progress.hidden = true;
 
         return () => {
-            tl.kill();
             section.style.removeProperty('--book-progress');
         };
     });
